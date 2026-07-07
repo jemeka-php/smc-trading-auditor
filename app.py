@@ -13,7 +13,11 @@ from PIL import Image
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from strategies import STRATEGIES, SIGNAL_SYSTEM_INSTRUCTION, SIGNAL_OUTPUT_TEMPLATE
+from strategies import (
+    STRATEGIES,
+    SIGNAL_SYSTEM_INSTRUCTION, SIGNAL_OUTPUT_TEMPLATE,
+    FEEDBACK_SYSTEM_INSTRUCTION, FEEDBACK_OUTPUT_TEMPLATE,
+)
 
 load_dotenv()
 
@@ -255,6 +259,7 @@ for key, default in [
     ("active_strategy", STRATEGY_NAMES[0]),
     ("signal_image_bytes", None),
     ("signal_report", None),
+    ("feedback_report", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -374,7 +379,7 @@ if not api_key:
     )
 
 # ── Tabs ──────────────────────────────────────
-tab_audit, tab_signal = st.tabs(["🔍 Strategy Audit", "⚡ Signal Generator"])
+tab_audit, tab_signal, tab_feedback = st.tabs(["🔍 Strategy Audit", "⚡ Signal Generator", "📝 Trade Feedback"])
 
 
 # ════════════════════════════════════════════
@@ -700,12 +705,228 @@ with tab_signal:
             )
 
 
+
+# ════════════════════════════════════════════
+#  TAB 3 — Trade Feedback / Post-Mortem
+# ════════════════════════════════════════════
+with tab_feedback:
+    st.markdown(
+        "<div style='background:linear-gradient(135deg,#1f0d0d,#0d1117);border:1px solid #f85149;"
+        "border-left:4px solid #f85149;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1.5rem;'>"
+        "<p style='color:#f85149;font-weight:700;font-size:1rem;margin:0;'>📝 Trade Post-Mortem Analyzer</p>"
+        "<p style='color:#8b949e;font-size:0.83rem;margin:0.4rem 0 0;'>"
+        "Took a loss? Submit your chart and trade details — the AI diagnoses exactly what went wrong, "
+        "identifies warning signs you missed, gives you the corrected setup, and builds 3 rules "
+        "to add to your checklist so you never repeat the same mistake."
+        "</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    fb_col1, fb_col2 = st.columns([1, 1], gap="large")
+
+    with fb_col1:
+        # ── Chart Uploads ──────────────────────
+        st.markdown("<div class='panel-label'>📥 Chart Upload</div>", unsafe_allow_html=True)
+
+        fb_setup_file = st.file_uploader(
+            "📈 Original Setup Chart (required)",
+            type=["png", "jpg", "jpeg", "webp", "bmp"],
+            key="fb_setup_file",
+            help="Upload the chart you were looking at when you took the trade.",
+        )
+        fb_outcome_file = st.file_uploader(
+            "📉 Post-Trade / Outcome Chart (optional)",
+            type=["png", "jpg", "jpeg", "webp", "bmp"],
+            key="fb_outcome_file",
+            help="Upload a chart showing what actually happened after your entry.",
+        )
+
+        if fb_setup_file:
+            try:
+                setup_pil = __import__("PIL").Image.open(fb_setup_file)
+                st.image(setup_pil, use_container_width=True, caption="Setup Chart")
+            except Exception:
+                pass
+        if fb_outcome_file:
+            try:
+                outcome_pil = __import__("PIL").Image.open(fb_outcome_file)
+                st.image(outcome_pil, use_container_width=True, caption="Outcome Chart")
+            except Exception:
+                pass
+
+        st.markdown("<div style='margin-top:1.2rem;'></div>", unsafe_allow_html=True)
+
+        # ── Trade Details Form ─────────────────
+        st.markdown("<div class='panel-label'>📋 Trade Details</div>", unsafe_allow_html=True)
+
+        fb_strategy = st.selectbox(
+            "Strategy Used",
+            options=STRATEGY_NAMES + ["Other / Mixed"],
+            key="fb_strategy",
+        )
+        fb_direction = st.radio(
+            "Trade Direction",
+            options=["🟢 Long (Buy)", "🔴 Short (Sell)"],
+            key="fb_direction", horizontal=True,
+        )
+
+        fb_c1, fb_c2 = st.columns(2)
+        with fb_c1:
+            fb_entry = st.text_input("Entry Price", placeholder="e.g. 64,250", key="fb_entry")
+            fb_sl    = st.text_input("Stop Loss",   placeholder="e.g. 63,800", key="fb_sl")
+            fb_tp    = st.text_input("Take Profit", placeholder="e.g. 65,500", key="fb_tp")
+        with fb_c2:
+            fb_exit  = st.text_input("Actual Exit Price", placeholder="e.g. 63,800", key="fb_exit")
+            fb_result = st.selectbox(
+                "Result",
+                options=["❌ Stop Loss Hit", "✅ Take Profit Hit", "⚠️ Breakeven", "🔄 Manually Closed"],
+                key="fb_result",
+            )
+            fb_pnl = st.text_input("P&L (optional)", placeholder="e.g. -$120 or -2R", key="fb_pnl")
+
+        fb_description = st.text_area(
+            "What happened? (your own words)",
+            placeholder=(
+                "e.g. 'I entered on what looked like a trendline bounce but price broke through "
+                "immediately after. I thought the 4H was bullish but hadn't checked the daily...'"
+            ),
+            height=120,
+            key="fb_description",
+        )
+
+        st.markdown("<div style='margin-top:1rem;'></div>", unsafe_allow_html=True)
+        feedback_button = st.button(
+            "🔬 Run Post-Mortem Analysis",
+            key="feedback_btn",
+            disabled=not (fb_setup_file and api_key),
+        )
+        if not fb_setup_file:
+            st.caption("⬆️ Upload your setup chart to run the post-mortem.")
+        elif not api_key:
+            st.caption("🔑 Configure your API key in the sidebar.")
+
+    # ── Output Column ──────────────────────────
+    with fb_col2:
+        st.markdown("<div class='panel-label'>🔬 Post-Mortem Report</div>", unsafe_allow_html=True)
+
+        if feedback_button and fb_setup_file and api_key:
+            st.session_state.feedback_report = None
+
+            # Build structured trade context
+            trade_context = (
+                f"TRADE DETAILS SUBMITTED BY TRADER:\n"
+                f"- Strategy Used: {fb_strategy}\n"
+                f"- Direction: {fb_direction}\n"
+                f"- Entry Price: {fb_entry or 'Not provided'}\n"
+                f"- Stop Loss: {fb_sl or 'Not provided'}\n"
+                f"- Take Profit: {fb_tp or 'Not provided'}\n"
+                f"- Actual Exit Price: {fb_exit or 'Not provided'}\n"
+                f"- Result: {fb_result}\n"
+                f"- P&L: {fb_pnl or 'Not provided'}\n"
+                f"- Trader's Description: {fb_description or 'Not provided'}\n\n"
+                f"Please perform a thorough post-mortem analysis of this trade.\n\n"
+                + FEEDBACK_OUTPUT_TEMPLATE
+            )
+
+            with st.spinner("🧠 Analyzing your trade... Diagnosing what went wrong..."):
+                try:
+                    client = genai.Client(api_key=api_key)
+
+                    # Build image parts — always include setup, optionally outcome
+                    fb_setup_file.seek(0)
+                    setup_bytes = fb_setup_file.read()
+                    contents = [
+                        types.Part.from_bytes(data=setup_bytes, mime_type="image/png"),
+                    ]
+                    if fb_outcome_file:
+                        fb_outcome_file.seek(0)
+                        outcome_bytes = fb_outcome_file.read()
+                        contents.append(
+                            types.Part.from_bytes(data=outcome_bytes, mime_type="image/png")
+                        )
+                    contents.append(trade_context)
+
+                    resp = client.models.generate_content(
+                        model=selected_model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=FEEDBACK_SYSTEM_INSTRUCTION,
+                            temperature=0.1,
+                        ),
+                    )
+                    st.session_state.feedback_report = resp.text
+                except Exception as e:
+                    st.session_state.feedback_report = f"❌ **Gemini API Error:** {e}"
+
+        if st.session_state.feedback_report:
+            fb_report = st.session_state.feedback_report
+            fb_upper = fb_report.upper()
+
+            # Root cause badge
+            tag_colors = {
+                "PREMATURE_ENTRY":  ("#e3b341", "#3d2f1a"),
+                "SL_TOO_TIGHT":     ("#e3b341", "#3d2f1a"),
+                "COUNTER_TREND":    ("#f85149", "#3d1a1a"),
+                "NO_CONFLUENCE":    ("#f85149", "#3d1a1a"),
+                "WRONG_ZONE":       ("#f85149", "#3d1a1a"),
+                "CHASED_ENTRY":     ("#e3b341", "#3d2f1a"),
+                "POOR_RR":          ("#e3b341", "#3d2f1a"),
+                "NEWS_EVENT":       ("#8b949e", "#21262d"),
+                "FAKEOUT":          ("#8b949e", "#21262d"),
+                "EMOTIONAL_TRADE":  ("#f85149", "#3d1a1a"),
+                "VALID_LOSS":       ("#3fb950", "#1a3d1f"),
+            }
+            for tag, (fg, bg) in tag_colors.items():
+                if tag in fb_upper:
+                    st.markdown(
+                        f"<div style='display:inline-block;background:{bg};border:1px solid {fg};"
+                        f"color:{fg};padding:0.35rem 1rem;border-radius:20px;font-weight:700;"
+                        f"font-size:0.9rem;margin-bottom:1rem;letter-spacing:1px;'>"
+                        f"🏷️ {tag.replace('_', ' ')}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    break
+
+            st.markdown(f"<div class='report-box'>{fb_report}</div>", unsafe_allow_html=True)
+            st.download_button(
+                label="⬇️ Download Post-Mortem (.md)",
+                data=fb_report.encode("utf-8"),
+                file_name="trade_post_mortem.md",
+                mime="text/markdown",
+                key="download_feedback",
+            )
+        elif feedback_button and not api_key:
+            st.error("🔑 Please configure your Gemini API key in the sidebar.")
+        elif feedback_button and not fb_setup_file:
+            st.warning("📤 Please upload your setup chart first.")
+        else:
+            st.markdown(
+                "<div class='placeholder-box' style='min-height:550px;'>"
+                "<div class='placeholder-icon'>🔬</div>"
+                "<div class='placeholder-text'>"
+                "<strong style='color:#484f58;'>Post-mortem report will appear here</strong><br><br>"
+                "<span style='color:#f85149;'>🏷️ Root Cause Tag</span><br>"
+                "<span style='color:#8b949e;font-size:0.85rem;'>e.g. PREMATURE_ENTRY · SL_TOO_TIGHT · COUNTER_TREND</span>"
+                "<br><br>"
+                "<span style='color:#58a6ff;'>🔍 Chart Warning Signs</span> &nbsp;·&nbsp; "
+                "<span style='color:#3fb950;'>✅ Corrected Setup</span><br>"
+                "<span style='color:#e3b341;'>📚 3 Checklist Rules</span> &nbsp;·&nbsp; "
+                "<span style='color:#8b949e;'>🧠 Mental Assessment</span><br><br>"
+                "<span style='color:#484f58;font-size:0.82rem;'>"
+                "Upload your setup chart + fill in trade details,<br>then click 🔬 Run Post-Mortem Analysis"
+                "</span>"
+                "</div></div>",
+                unsafe_allow_html=True,
+            )
+
+
 # ── Footer ────────────────────────────────────
+
 st.markdown("<div style='margin-top:3rem;'></div>", unsafe_allow_html=True)
 st.markdown(
     "<hr style='border-color:#21262d;'>"
     "<p style='text-align:center;color:#484f58;font-size:0.78rem;margin-top:0.8rem;'>"
-    "AI Trading Auditor v2.0 · 8 Strategies + Signal Generator · Powered by Google Gemini AI · "
+    "AI Trading Auditor v3.0 · 8 Strategies · Signal Generator · Trade Post-Mortem · Powered by Google Gemini AI · "
     "For educational purposes only. Not financial advice."
     "</p>",
     unsafe_allow_html=True,

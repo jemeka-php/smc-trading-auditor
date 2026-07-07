@@ -226,31 +226,9 @@ def run_audit(image_bytes: bytes, model_id: str, api_key: str, strategy_name: st
             return f"❌ **Gemini API Error:** {err}"
 
 
-def run_signal_generator(image_bytes: bytes, model_id: str, api_key: str) -> str:
-    try:
-        client = genai.Client(api_key=api_key)
-        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-        prompt = (
-            "Scan this trading chart and generate the single best, highest-probability "
-            "trade signal you can identify.\n\n" + SIGNAL_OUTPUT_TEMPLATE
-        )
-        response = client.models.generate_content(
-            model=model_id,
-            contents=[image_part, prompt],
-            config=types.GenerateContentConfig(
-                system_instruction=SIGNAL_SYSTEM_INSTRUCTION,
-                temperature=0.15,
-            ),
-        )
-        return response.text
-    except Exception as e:
-        err = str(e)
-        if "API_KEY_INVALID" in err or "invalid" in err.lower():
-            return "❌ **Invalid API Key.** Check your Gemini API key in the sidebar."
-        elif "quota" in err.lower() or "429" in err:
-            return "❌ **API Quota Exceeded.** Wait a moment and retry, or switch models."
-        else:
-            return f"❌ **Gemini API Error:** {err}"
+# NOTE: Signal generation is handled inline inside tab_signal to support
+# dynamic TF override and strategy hint injection into the system prompt.
+# A standalone function would bypass those runtime patches.
 
 
 # ── Session State Init ────────────────────────
@@ -272,7 +250,7 @@ with st.sidebar:
         "<div style='text-align:center;margin-bottom:1.5rem;'>"
         "<span style='font-size:2rem;'>📊</span>"
         "<p style='color:#58a6ff;font-weight:700;font-size:1.1rem;margin:0.3rem 0 0;'>AI Trading Auditor</p>"
-        "<p style='color:#484f58;font-size:0.75rem;margin:0;'>Multi-Strategy Risk Engine v2.0</p>"
+        "<p style='color:#484f58;font-size:0.75rem;margin:0;'>Multi-Strategy Risk Engine v4.0</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -586,6 +564,35 @@ with tab_signal:
 
         st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
 
+        # ── TF Preference ──────────────────────
+        st.markdown("<div class='panel-label'>⏱️ Preferred Execution Timeframe</div>", unsafe_allow_html=True)
+        sig_tf_pref = st.radio(
+            "Preferred execution TF",
+            options=["Auto (AI decides)", "30M — Day Trade", "15M — Intraday", "5M — Precision Entry", "1M — Scalp"],
+            index=0,
+            key="sig_tf_pref",
+            horizontal=False,
+            help="The AI will calibrate entry, SL, and TP levels to this timeframe. Auto lets the AI choose based on setup quality.",
+            label_visibility="collapsed",
+        )
+
+        # TF descriptions
+        tf_desc = {
+            "Auto (AI decides)":         ("🤖", "AI picks the best TF based on setup quality"),
+            "30M — Day Trade":           ("🟦", "Clean setups · 2-8hr hold · SL 0.4%-1.2%"),
+            "15M — Intraday":            ("🟩", "Kill zones · FVG fills · 30min-3hr hold"),
+            "5M — Precision Entry":      ("🟨", "Tight entries · Key level touches · 15-90min"),
+            "1M — Scalp":               ("🟥", "Ultra-fast · Must be 8+/10 confluence · High risk"),
+        }
+        icon, desc = tf_desc[sig_tf_pref]
+        st.markdown(
+            f"<div style='background:#161b22;border:1px solid #21262d;border-radius:6px;"
+            f"padding:0.5rem 0.8rem;font-size:0.78rem;color:#8b949e;margin-top:0.4rem;'>"
+            f"{icon} {desc}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='margin-top:0.8rem;'></div>", unsafe_allow_html=True)
+
         # Strategy hint (optional)
         sig_hint = st.selectbox(
             "🎯 Strategy hint (optional)",
@@ -634,14 +641,30 @@ with tab_signal:
                 f" Focus particularly on {sig_hint} patterns."
                 if sig_hint != "Auto-detect best setup" else ""
             )
+            # Build TF instruction
+            tf_map = {
+                "Auto (AI decides)":    "",
+                "30M — Day Trade":      "30M",
+                "15M — Intraday":       "15M",
+                "5M — Precision Entry": "5M",
+                "1M — Scalp":          "1M",
+            }
+            chosen_tf = tf_map.get(sig_tf_pref, "")
+            tf_instruction = (
+                f"\n\nTRADER TF OVERRIDE: The trader has explicitly requested the execution timeframe "
+                f"be {chosen_tf}. Calibrate the entry trigger, stop loss distance, and TP targets "
+                f"specifically for the {chosen_tf} chart. If {chosen_tf} is unsuitable for this setup "
+                f"(e.g. not enough structure visible), state this in the Timeframe Rationale section "
+                f"and recommend the next closest preferred TF (30M > 15M > 5M > 1M)."
+                if chosen_tf else ""
+            )
             with st.spinner("🧠 Scanning chart for highest-probability setup... 15–30 seconds."):
-                # Temporarily patch prompt if hint given
                 from strategies import SIGNAL_SYSTEM_INSTRUCTION as _SYS
                 patched_sys = _SYS + (
                     f"\n\nUSER HINT: The user suspects a {sig_hint} setup. "
                     f"Give it priority if it is clearly present, but still pick the best setup overall."
                     if sig_hint != "Auto-detect best setup" else ""
-                )
+                ) + tf_instruction
                 try:
                     client = genai.Client(api_key=api_key)
                     image_part = types.Part.from_bytes(

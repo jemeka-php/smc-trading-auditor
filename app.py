@@ -18,6 +18,7 @@ from strategies import (
     SIGNAL_SYSTEM_INSTRUCTION, SIGNAL_OUTPUT_TEMPLATE,
     FEEDBACK_SYSTEM_INSTRUCTION, FEEDBACK_OUTPUT_TEMPLATE,
 )
+from coin_scanner import get_top_midcap_coins
 
 load_dotenv()
 
@@ -379,7 +380,9 @@ if not api_key:
     )
 
 # ── Tabs ──────────────────────────────────────
-tab_audit, tab_signal, tab_feedback = st.tabs(["🔍 Strategy Audit", "⚡ Signal Generator", "📝 Trade Feedback"])
+tab_audit, tab_signal, tab_feedback, tab_scanner = st.tabs([
+    "🔍 Strategy Audit", "⚡ Signal Generator", "📝 Trade Feedback", "🔎 Coin Scanner"
+])
 
 
 # ════════════════════════════════════════════
@@ -920,13 +923,180 @@ with tab_feedback:
             )
 
 
+# ════════════════════════════════════════════
+#  TAB 4 — Coin Scanner
+# ════════════════════════════════════════════
+with tab_scanner:
+    st.markdown(
+        "<div style='background:linear-gradient(135deg,#0a1628,#0d1117);border:1px solid #1f6feb;"
+        "border-left:4px solid #58a6ff;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1.5rem;'>"
+        "<p style='color:#58a6ff;font-weight:700;font-size:1rem;margin:0;'>🔎 MEXC Mid-Cap Coin Scanner</p>"
+        "<p style='color:#8b949e;font-size:0.83rem;margin:0.4rem 0 0;'>"
+        "Scans MEXC live market data in real-time to find mid-cap USDT pairs with strong volume and trend momentum. "
+        "Each coin is scored and matched to the strategy it is best suited for."
+        "</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Scan Controls ──────────────────────────────────────────────────
+    sc_col_a, sc_col_b, sc_col_c, sc_col_d = st.columns([1.2, 1.2, 1, 0.8])
+    with sc_col_a:
+        sc_min_vol = st.select_slider(
+            "Min 24h Volume (USDT)",
+            options=[500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000],
+            value=2_000_000,
+            format_func=lambda x: f"${x/1_000_000:.1f}M",
+            key="sc_min_vol",
+        )
+    with sc_col_b:
+        sc_max_vol = st.select_slider(
+            "Max 24h Volume (USDT)",
+            options=[20_000_000, 50_000_000, 100_000_000, 150_000_000, 300_000_000],
+            value=150_000_000,
+            format_func=lambda x: f"${x/1_000_000:.0f}M",
+            key="sc_max_vol",
+        )
+    with sc_col_c:
+        sc_min_chg = st.select_slider(
+            "Min 24h Move",
+            options=[1.0, 2.0, 3.0, 5.0, 8.0],
+            value=2.0,
+            format_func=lambda x: f"{x:.0f}%",
+            key="sc_min_chg",
+        )
+    with sc_col_d:
+        sc_direction = st.selectbox(
+            "Direction",
+            options=["Both", "Bullish", "Bearish"],
+            key="sc_direction",
+        )
+
+    scan_btn = st.button("🔎 Scan MEXC Now", key="scan_btn", use_container_width=False)
+
+    if "scan_results" not in st.session_state:
+        st.session_state.scan_results = None
+    if "scan_error" not in st.session_state:
+        st.session_state.scan_error = None
+
+    if scan_btn:
+        st.session_state.scan_results = None
+        st.session_state.scan_error = None
+        with st.spinner("📡 Fetching live MEXC market data..."):
+            try:
+                coins = get_top_midcap_coins(
+                    min_vol_usdt=sc_min_vol,
+                    max_vol_usdt=sc_max_vol,
+                    min_change_pct=sc_min_chg,
+                    direction=sc_direction,
+                    top_n=10,
+                )
+                st.session_state.scan_results = coins
+            except Exception as e:
+                st.session_state.scan_error = str(e)
+
+    if st.session_state.scan_error:
+        st.error(f"❌ {st.session_state.scan_error}")
+
+    elif st.session_state.scan_results:
+        coins = st.session_state.scan_results
+        st.markdown(
+            f"<div class='chip-row'>"
+            f"<div class='chip chip-blue'>📡 Live MEXC Data</div>"
+            f"<div class='chip chip-green'>✅ {len(coins)} Coins Found</div>"
+            f"<div class='chip'>💰 Vol ${sc_min_vol/1e6:.1f}M–${sc_max_vol/1e6:.0f}M</div>"
+            f"<div class='chip'>📈 ≥{sc_min_chg:.0f}% Move</div>"
+            f"<div class='chip'>{sc_direction}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        for i, coin in enumerate(coins, 1):
+            chg    = coin["change_pct"]
+            chg_color = "#3fb950" if chg >= 0 else "#f85149"
+            chg_arrow = "▲" if chg >= 0 else "▼"
+            vol_m  = coin["quote_volume"] / 1_000_000
+            score  = coin["score"]
+            score_color = "#3fb950" if score >= 60 else "#e3b341" if score >= 40 else "#f85149"
+            strats = coin["strategies"]
+            mom    = coin["momentum"].upper()
+            vola   = coin["volatility"].upper()
+
+            strat_chips = " ".join(
+                [f"<span style='background:#0c2a4a;border:1px solid #1f6feb;color:#58a6ff;"
+                 f"border-radius:12px;padding:0.15rem 0.6rem;font-size:0.72rem;"
+                 f"font-family:JetBrains Mono,monospace;'>{s}</span>"
+                 for s in strats]
+            )
+
+            st.markdown(
+                f"<div style='background:#161b22;border:1px solid #21262d;border-left:3px solid {score_color};"
+                f"border-radius:8px;padding:0.9rem 1.1rem;margin-bottom:0.7rem;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                # Left: rank + symbol + price
+                f"<div>"
+                f"<span style='color:#484f58;font-size:0.75rem;font-family:JetBrains Mono,monospace;'>#{i:02d}</span>&nbsp;"
+                f"<span style='color:#c9d1d9;font-weight:700;font-size:1.05rem;font-family:JetBrains Mono,monospace;'>{coin['base']}/USDT</span>&nbsp;"
+                f"<span style='color:#8b949e;font-size:0.82rem;'>${coin['price']:,.6g}</span>"
+                f"<br>"
+                f"<span style='font-size:0.75rem;margin-top:0.3rem;display:inline-block;'>"
+                f"📊 Vol: <strong style='color:#c9d1d9;'>${vol_m:.2f}M</strong>&nbsp;&nbsp;"
+                f"Momentum: <span style='color:#e3b341;'>{mom}</span>&nbsp;&nbsp;"
+                f"Volatility: <span style='color:#8b949e;'>{vola}</span>"
+                f"</span>"
+                f"</div>"
+                # Right: change + score
+                f"<div style='text-align:right;'>"
+                f"<span style='color:{chg_color};font-weight:700;font-size:1.1rem;'>{chg_arrow} {abs(chg):.2f}%</span><br>"
+                f"<span style='background:{score_color}22;border:1px solid {score_color};color:{score_color};"
+                f"border-radius:12px;padding:0.1rem 0.6rem;font-size:0.78rem;font-weight:700;'>"
+                f"Score {score:.0f}/100</span>"
+                f"</div></div>"
+                # Strategy chips
+                f"<div style='margin-top:0.6rem;display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;'>"
+                f"<span style='color:#484f58;font-size:0.72rem;'>Best for:</span> {strat_chips}"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+
+        # MEXC link helper
+        st.markdown(
+            "<div style='margin-top:1rem;padding:0.7rem 1rem;background:#0d1117;"
+            "border:1px solid #21262d;border-radius:6px;font-size:0.78rem;color:#484f58;'>"
+            "💡 <strong style='color:#8b949e;'>Tip:</strong> Click a coin's symbol above to search it on "
+            "<a href='https://www.mexc.com/exchange/' target='_blank' "
+            "style='color:#58a6ff;text-decoration:none;'>MEXC Exchange</a>. "
+            "Then take a screenshot of the TradingView chart and run it through the "
+            "<strong style='color:#58a6ff;'>Strategy Audit</strong> or "
+            "<strong style='color:#3fb950;'>Signal Generator</strong> tab."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    else:
+        st.markdown(
+            "<div class='placeholder-box' style='min-height:400px;'>"
+            "<div class='placeholder-icon'>📡</div>"
+            "<div class='placeholder-text'>"
+            "<strong style='color:#484f58;'>No scan run yet</strong><br><br>"
+            "Set your filters above and click "
+            "<strong style='color:#58a6ff;'>🔎 Scan MEXC Now</strong><br><br>"
+            "<span style='color:#8b949e;font-size:0.85rem;'>"
+            "Scans live MEXC market data · Filters mid-cap USDT pairs<br>"
+            "Scores by volume, momentum & range quality<br>"
+            "Matches each coin to your best-fit strategy"
+            "</span>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
 # ── Footer ────────────────────────────────────
 
 st.markdown("<div style='margin-top:3rem;'></div>", unsafe_allow_html=True)
 st.markdown(
     "<hr style='border-color:#21262d;'>"
     "<p style='text-align:center;color:#484f58;font-size:0.78rem;margin-top:0.8rem;'>"
-    "AI Trading Auditor v3.0 · 8 Strategies · Signal Generator · Trade Post-Mortem · Powered by Google Gemini AI · "
+    "AI Trading Auditor v4.0 · 8 Strategies · Signal Generator · Trade Post-Mortem · MEXC Coin Scanner · Powered by Google Gemini AI · "
     "For educational purposes only. Not financial advice."
     "</p>",
     unsafe_allow_html=True,

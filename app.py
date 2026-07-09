@@ -17,6 +17,7 @@ from strategies import (
     STRATEGIES,
     SIGNAL_SYSTEM_INSTRUCTION, SIGNAL_OUTPUT_TEMPLATE,
     FEEDBACK_SYSTEM_INSTRUCTION, FEEDBACK_OUTPUT_TEMPLATE,
+    DEBATE_CHALLENGER_INSTRUCTION, DEBATE_SYNTHESIS_INSTRUCTION
 )
 from coin_scanner import get_top_midcap_coins
 
@@ -225,6 +226,82 @@ def run_audit(image_bytes: bytes, model_id: str, api_key: str, strategy_name: st
         else:
             return f"❌ **Gemini API Error:** {err}"
 
+def run_signal_debate(image_bytes: bytes, initial_signal: str, api_key: str) -> dict:
+    """
+    Runs the multi-round AI debate.
+    Uses gemini-2.5-pro for the challenger, with an automatic fallback to gemini-2.5-flash if 429 quota error.
+    Then uses the original proposer model (or flash) for arbitration.
+    """
+    client = genai.Client(api_key=api_key)
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+    
+    debate_log = []
+    
+    # --- Round 1: Challenger (Pro with Flash Fallback) ---
+    challenger_model = "gemini-2.5-pro"
+    challenger_prompt = f"Here is the proposed trade signal:\n\n{initial_signal}\n\nCritique this setup."
+    
+    try:
+        challenger_resp = client.models.generate_content(
+            model=challenger_model,
+            contents=[image_part, challenger_prompt],
+            config=types.GenerateContentConfig(
+                system_instruction=DEBATE_CHALLENGER_INSTRUCTION,
+                temperature=0.45,
+            )
+        )
+    except Exception as e:
+        if "429" in str(e) or "quota" in str(e).lower():
+            challenger_model = "gemini-2.5-flash"
+            challenger_resp = client.models.generate_content(
+                model=challenger_model,
+                contents=[image_part, challenger_prompt],
+                config=types.GenerateContentConfig(
+                    system_instruction=DEBATE_CHALLENGER_INSTRUCTION,
+                    temperature=0.45,
+                )
+            )
+        else:
+            raise e
+
+    challenger_text = challenger_resp.text
+    debate_log.append({"round": 1, "role": "Challenger", "model": challenger_model, "content": challenger_text})
+    
+    # If Challenger accepts, no arbitration needed.
+    if "VERDICT: ACCEPT" in challenger_text.upper():
+        return {
+            "debate_log": debate_log,
+            "final_signal": initial_signal,
+            "consensus": True,
+            "rounds_taken": 1
+        }
+        
+    # --- Round 2: Arbitration ---
+    arbitrator_model = "gemini-2.5-flash" # Use flash for synthesis to ensure it completes
+    arbitrator_prompt = (
+        f"Original Signal:\n{initial_signal}\n\n"
+        f"Challenger Critique:\n{challenger_text}\n\n"
+        "Please synthesize the final signal."
+    )
+    
+    arbitrator_resp = client.models.generate_content(
+        model=arbitrator_model,
+        contents=[image_part, arbitrator_prompt],
+        config=types.GenerateContentConfig(
+            system_instruction=DEBATE_SYNTHESIS_INSTRUCTION,
+            temperature=0.1,
+        )
+    )
+    
+    debate_log.append({"round": 2, "role": "Arbitrator", "model": arbitrator_model, "content": "Synthesis complete."})
+    
+    return {
+        "debate_log": debate_log,
+        "final_signal": arbitrator_resp.text,
+        "consensus": False,
+        "rounds_taken": 2
+    }
+
 
 # NOTE: Signal generation is handled inline inside tab_signal to support
 # dynamic TF override and strategy hint injection into the system prompt.
@@ -239,6 +316,8 @@ for key, default in [
     ("signal_image_bytes", None),
     ("signal_report", None),
     ("feedback_report", None),
+    ("debate_log", []),
+    ("debate_final", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -637,6 +716,8 @@ with tab_signal:
 
         if signal_button and st.session_state.signal_image_bytes and api_key:
             st.session_state.signal_report = None
+            st.session_state.debate_log = []
+            st.session_state.debate_final = None
             hint_text = (
                 f" Focus particularly on {sig_hint} patterns."
                 if sig_hint != "Auto-detect best setup" else ""
@@ -710,6 +791,65 @@ with tab_signal:
                 mime="text/markdown",
                 key="download_signal",
             )
+            
+            # --- AI Debate Section ---
+            st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div style='background:linear-gradient(135deg,#2a1f0d,#0d1117);border:1px solid #d29922;"
+                "border-left:4px solid #e3b341;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;'>"
+                "<p style='color:#e3b341;font-weight:700;font-size:1rem;margin:0;'>🥊 Stress-Test Setup (AI Debate)</p>"
+                "<p style='color:#8b949e;font-size:0.83rem;margin:0.4rem 0 0;'>"
+                "Have a second Gemini instance (Devil's Advocate) critique this signal to find flaws "
+                "the first model missed. If flaws are found, a final consensus signal will be synthesized."
+                "</p></div>",
+                unsafe_allow_html=True,
+            )
+            
+            debate_button = st.button("🥊 Run AI Debate", key="debate_btn")
+            
+            if debate_button:
+                st.session_state.debate_log = []
+                st.session_state.debate_final = None
+                with st.status("🥊 Running AI Signal Debate...", expanded=True) as status:
+                    try:
+                        st.write("🧠 Challenger (Devil's Advocate) analyzing chart...")
+                        debate_results = run_signal_debate(
+                            image_bytes=st.session_state.signal_image_bytes,
+                            initial_signal=st.session_state.signal_report,
+                            api_key=api_key,
+                        )
+                        st.session_state.debate_log = debate_results["debate_log"]
+                        st.session_state.debate_final = debate_results["final_signal"]
+                        if debate_results["consensus"]:
+                            status.update(label="✅ Consensus Reached! (Signal Flawless)", state="complete")
+                        else:
+                            status.update(label="⚖️ Arbitration Complete (Signal Optimized)", state="complete")
+                    except Exception as e:
+                        status.update(label=f"❌ Debate failed: {e}", state="error")
+            
+            if st.session_state.debate_log:
+                st.markdown("<div class='panel-label' style='margin-top:1.5rem;'>🥊 Debate Timeline</div>", unsafe_allow_html=True)
+                for entry in st.session_state.debate_log:
+                    if entry["role"] == "Challenger":
+                        st.markdown(
+                            f"<div style='background:#1a150d;border:1px solid #3d2f1a;border-radius:8px;padding:1rem;margin-bottom:1rem;'>"
+                            f"<div style='color:#e3b341;font-weight:700;margin-bottom:0.5rem;'>⚡ Challenger Critique (Round {entry['round']} - {entry['model']})</div>"
+                            f"<div style='font-size:0.9rem;'>{entry['content']}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
+                
+                if st.session_state.debate_final:
+                    st.markdown("<div class='panel-label' style='margin-top:1.5rem;'>🏆 Final Optimized Signal</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='report-box'>{st.session_state.debate_final}</div>", unsafe_allow_html=True)
+                    
+                    st.download_button(
+                        label="⬇️ Download Consensus Signal (.md)",
+                        data=st.session_state.debate_final.encode("utf-8"),
+                        file_name="trade_signal_consensus.md",
+                        mime="text/markdown",
+                        key="download_consensus_signal",
+                    )
         elif signal_button and not api_key:
             st.error("🔑 Please configure your Gemini API key in the sidebar.")
         elif signal_button and not st.session_state.signal_image_bytes:

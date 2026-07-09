@@ -580,7 +580,7 @@ FEEDBACK_OUTPUT_TEMPLATE = (
     "[One powerful, direct sentence summarizing the single most important takeaway from this trade.]"
 )
 
-# ── AI Debate System Prompts ──────────────────────────────────────────────────
+# ── AI Debate System Prompts ───────────────────────────────────────────────────
 DEBATE_CHALLENGER_INSTRUCTION = (
     "You are an aggressive, contrarian institutional Risk Manager (Devil's Advocate). "
     "Another analyst has just proposed a trade signal based on the uploaded chart. "
